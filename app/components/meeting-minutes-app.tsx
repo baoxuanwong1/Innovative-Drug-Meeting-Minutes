@@ -27,6 +27,22 @@ const defaultTemplate = `# 会议纪要
 
 ## 七、关键数据与原文依据`
 
+const parseResponse = async (response: Response) => {
+  const text = await response.text()
+
+  if (!text)
+    return {}
+
+  try {
+    return JSON.parse(text)
+  }
+  catch {
+    return {
+      error: text,
+    }
+  }
+}
+
 const MeetingMinutesApp = () => {
   const [file, setFile] = useState<File | null>(null)
   const [meetingTitle, setMeetingTitle] = useState('')
@@ -84,22 +100,52 @@ const MeetingMinutesApp = () => {
     setMinutes('')
     setState('uploading')
 
-    const formData = new FormData()
-    formData.append('file', file)
-    formData.append('meeting_title', meetingTitle)
-    formData.append('meeting_date', meetingDate)
-    formData.append('meeting_background', meetingBackground)
-    formData.append('focus_points', focusPoints)
-    formData.append('template_style', templateStyle)
-
     try {
+      const uploadUrlResponse = await fetch('/api/oss-upload-url', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          filename: file.name,
+          content_type: file.type || 'application/octet-stream',
+        }),
+      })
+      const uploadPayload = await parseResponse(uploadUrlResponse)
+
+      if (!uploadUrlResponse.ok)
+        throw new Error(uploadPayload.error || 'OSS 上传链接生成失败。')
+
+      const ossResponse = await fetch(uploadPayload.upload_url, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': uploadPayload.content_type,
+        },
+        body: file,
+      })
+
+      if (!ossResponse.ok) {
+        const message = await ossResponse.text().catch(() => '')
+        throw new Error(message || `OSS 上传失败：${ossResponse.status}`)
+      }
+
       setState('running')
       const response = await fetch('/api/meeting-minutes', {
         method: 'POST',
-        body: formData,
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          audio_url: uploadPayload.audio_url,
+          meeting_title: meetingTitle,
+          meeting_date: meetingDate,
+          meeting_background: meetingBackground,
+          focus_points: focusPoints,
+          template_style: templateStyle,
+        }),
       })
 
-      const payload = await response.json()
+      const payload = await parseResponse(response)
 
       if (!response.ok)
         throw new Error(payload.error || '会议纪要生成失败。')

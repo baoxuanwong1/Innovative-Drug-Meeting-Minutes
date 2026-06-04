@@ -242,33 +242,55 @@ const generateMeetingMinutes = async (prompt: string) => {
 
 export async function POST(request: Request) {
   try {
-    const formData = await request.formData()
-    const file = formData.get('file')
+    const contentType = request.headers.get('content-type') || ''
+    let audioUrl = ''
+    let meetingTitle = ''
+    let meetingDate = ''
+    let meetingBackground = ''
+    let focusPoints = ''
+    let templateStyle = ''
 
-    if (!(file instanceof File))
-      return buildError('No audio or video file was uploaded.', 400)
+    if (contentType.includes('application/json')) {
+      const body = await request.json()
+      audioUrl = String(body.audio_url || '')
+      meetingTitle = String(body.meeting_title || '')
+      meetingDate = String(body.meeting_date || '')
+      meetingBackground = String(body.meeting_background || '')
+      focusPoints = String(body.focus_points || '')
+      templateStyle = String(body.template_style || '')
+    }
+    else {
+      const formData = await request.formData()
+      const file = formData.get('file')
 
-    const buffer = Buffer.from(await file.arrayBuffer())
-    const objectName = `meeting-media/${Date.now()}-${safeName(file.name)}`
-    const ossClient = getOssClient()
+      if (!(file instanceof File))
+        return buildError('No audio or video file was uploaded.', 400)
 
-    await ossClient.put(objectName, buffer, {
-      headers: {
-        'content-type': file.type || 'application/octet-stream',
-      },
-    })
+      const buffer = Buffer.from(await file.arrayBuffer())
+      const objectName = `meeting-media/${Date.now()}-${safeName(file.name)}`
+      const ossClient = getOssClient()
 
-    const expires = Number(process.env.ALI_OSS_SIGNED_URL_EXPIRES || 3600)
-    const audioUrl = ossClient.signatureUrl(objectName, {
-      expires,
-      method: 'GET',
-    })
+      await ossClient.put(objectName, buffer, {
+        headers: {
+          'content-type': file.type || 'application/octet-stream',
+        },
+      })
 
-    const meetingTitle = String(formData.get('meeting_title') || '')
-    const meetingDate = String(formData.get('meeting_date') || '')
-    const meetingBackground = String(formData.get('meeting_background') || '')
-    const focusPoints = String(formData.get('focus_points') || '')
-    const templateStyle = String(formData.get('template_style') || '')
+      const expires = Number(process.env.ALI_OSS_SIGNED_URL_EXPIRES || 3600)
+      audioUrl = ossClient.signatureUrl(objectName, {
+        expires,
+        method: 'GET',
+      })
+
+      meetingTitle = String(formData.get('meeting_title') || '')
+      meetingDate = String(formData.get('meeting_date') || '')
+      meetingBackground = String(formData.get('meeting_background') || '')
+      focusPoints = String(formData.get('focus_points') || '')
+      templateStyle = String(formData.get('template_style') || '')
+    }
+
+    if (!audioUrl)
+      return buildError('No audio_url was provided.', 400)
 
     const taskId = await submitTranscriptionTask(audioUrl)
     const { transcriptionUrl, payload: taskPayload } = await waitForTranscription(taskId)

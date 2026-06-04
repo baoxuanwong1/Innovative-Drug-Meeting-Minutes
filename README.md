@@ -10,8 +10,9 @@ It does not require a Dify Workflow.
 
 ```text
 Browser upload
--> Next.js API route
--> Aliyun OSS signed URL
+-> Next.js API route creates an OSS signed upload URL
+-> Browser uploads the file directly to Aliyun OSS
+-> Next.js API route receives the OSS signed download URL
 -> DashScope Paraformer ASR
 -> Download transcription JSON
 -> Extract transcript
@@ -58,5 +59,6 @@ Open [http://localhost:3000](http://localhost:3000).
 
 - The server running this app must be able to reach Aliyun OSS and DashScope.
 - `ALI_OSS_REGION` must match the real region of `ALI_OSS_BUCKET`.
+- The OSS bucket needs CORS enabled for browser uploads. Allow your local/Vercel origin, method `PUT`, and header `Content-Type`.
 - The OSS signed URL expiry should be long enough for ASR processing. Start with `3600`.
 - Long recordings may exceed Vercel request time limits. Start with short recordings, then adjust `DASHSCOPE_ASR_MAX_ATTEMPTS` and deployment timeout as needed.
