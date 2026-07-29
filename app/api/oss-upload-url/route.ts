@@ -12,6 +12,8 @@ const requiredEnv = (key: string) => {
 
 const safeName = (name: string) => name.replace(/[^a-zA-Z0-9._-]/g, '_')
 
+const storageEndpoint = (bucket: string, region: string) => `https://${bucket}.${region}.aliyuncs.com`
+
 const getOssClient = () => {
   return new OSS({
     region: requiredEnv('ALI_OSS_REGION'),
@@ -34,19 +36,34 @@ export async function POST(request: Request) {
     const expires = Number(process.env.ALI_OSS_SIGNED_URL_EXPIRES || 3600)
     const objectName = `meeting-media/${Date.now()}-${safeName(filename)}`
     const ossClient = getOssClient()
-
-    const uploadUrl = ossClient.signatureUrl(objectName, {
-      expires,
-      method: 'PUT',
-      'Content-Type': contentType,
-    })
+    const bucket = requiredEnv('ALI_OSS_BUCKET')
+    const region = requiredEnv('ALI_OSS_REGION')
+    const expiration = new Date(Date.now() + expires * 1000).toISOString()
+    const policy = {
+      expiration,
+      conditions: [
+        ['eq', '$key', objectName],
+        ['content-length-range', 0, 2 * 1024 * 1024 * 1024],
+        ['eq', '$success_action_status', '204'],
+      ],
+    }
+    const signature = ossClient.calculatePostSignature(policy)
     const fileUrl = ossClient.signatureUrl(objectName, {
       expires,
       method: 'GET',
     })
 
     return NextResponse.json({
-      upload_url: uploadUrl,
+      // HTML form upload deliberately avoids a browser CORS preflight. The
+      // signed fields only permit this exact object name until expiration.
+      upload_url: storageEndpoint(bucket, region),
+      upload_fields: {
+        key: objectName,
+        policy: signature.policy,
+        OSSAccessKeyId: signature.OSSAccessKeyId,
+        Signature: signature.Signature,
+        success_action_status: '204',
+      },
       file_url: fileUrl,
       content_type: contentType,
       object_name: objectName,

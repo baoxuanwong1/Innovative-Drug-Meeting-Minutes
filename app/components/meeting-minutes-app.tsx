@@ -6,6 +6,7 @@ import remarkGfm from 'remark-gfm'
 
 type SubmitState = 'idle' | 'uploading' | 'transcribing' | 'transcribed' | 'writing' | 'done' | 'error'
 type UploadedFile = { name: string; url: string; type: string }
+type UploadTicket = { upload_url: string; upload_fields: Record<string, string>; file_url: string; content_type: string; object_name: string }
 
 const mediaExtensions = new Set(['mp3', 'm4a', 'wav', 'aac', 'ogg', 'flac', 'mp4', 'mov', 'mkv', 'webm'])
 const maxMediaSize = 2 * 1024 * 1024 * 1024
@@ -19,6 +20,73 @@ const parseResponse = async (response: Response) => {
 
 const extensionOf = (name: string) => name.split('.').pop()?.toLowerCase() || ''
 const formatSize = (size: number) => `${(size / 1024 / 1024).toFixed(size > 1024 * 1024 * 1024 ? 0 : 1)} ${size > 1024 * 1024 * 1024 ? 'GB' : 'MB'}`
+
+// A native HTML form is used instead of fetch() for the cross-origin object
+// upload. Form submissions do not require the bucket to grant browser CORS,
+// while the short-lived policy limits the upload to one exact object name.
+const uploadBySignedForm = (file: File, ticket: UploadTicket) => new Promise<void>((resolve, reject) => {
+  const frameName = `meeting-upload-${crypto.randomUUID()}`
+  const iframe = document.createElement('iframe')
+  const form = document.createElement('form')
+  let submitted = false
+  let settled = false
+  const cleanUp = () => {
+    window.clearTimeout(timer)
+    form.remove()
+    iframe.remove()
+  }
+  const finish = (error?: Error) => {
+    if (settled) return
+    settled = true
+    cleanUp()
+    if (error) reject(error)
+    else resolve()
+  }
+  const timer = window.setTimeout(() => finish(new Error(`「${file.name}」上传超时，请检查网络后重试。`)), 10 * 60 * 1000)
+
+  iframe.name = frameName
+  iframe.title = '文件上传'
+  iframe.className = 'hidden'
+  iframe.addEventListener('load', () => { if (submitted) finish() })
+  iframe.addEventListener('error', () => finish(new Error(`「${file.name}」上传失败，请重试。`)))
+  form.action = ticket.upload_url
+  form.method = 'post'
+  form.enctype = 'multipart/form-data'
+  form.target = frameName
+  form.className = 'hidden'
+
+  Object.entries(ticket.upload_fields).forEach(([name, value]) => {
+    const input = document.createElement('input')
+    input.type = 'hidden'
+    input.name = name
+    input.value = value
+    form.append(input)
+  })
+  const fileInput = document.createElement('input')
+  fileInput.type = 'file'
+  fileInput.name = 'file'
+  const transfer = new DataTransfer()
+  transfer.items.add(file)
+  fileInput.files = transfer.files
+  form.append(fileInput)
+
+  document.body.append(iframe, form)
+  submitted = true
+  form.submit()
+})
+
+const waitForStoredFile = async (file: File, ticket: UploadTicket) => {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const response = await fetch('/api/oss-upload-status', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ object_name: ticket.object_name }),
+    })
+    const payload = await parseResponse(response)
+    if (response.ok && payload.uploaded) return
+    await new Promise(resolve => window.setTimeout(resolve, 750))
+  }
+  throw new Error(`「${file.name}」未能上传到处理服务，请重试。`)
+}
 
 const statusLabels: Record<SubmitState, string> = {
   idle: '等待文件', uploading: '正在上传文件', transcribing: '正在将音视频转为文字',
@@ -78,10 +146,9 @@ const MeetingMinutesApp = () => {
     })
     const payload = await parseResponse(signedUrlResponse)
     if (!signedUrlResponse.ok) throw new Error(payload.error || `无法为「${file.name}」创建上传链接。`)
-    const uploadResponse = await fetch(payload.upload_url, {
-      method: 'PUT', headers: { 'Content-Type': payload.content_type }, body: file,
-    })
-    if (!uploadResponse.ok) throw new Error(`「${file.name}」上传失败。`)
+    const ticket = payload as UploadTicket
+    await uploadBySignedForm(file, ticket)
+    await waitForStoredFile(file, ticket)
     return { name: file.name, url: payload.file_url, type: file.type || 'application/octet-stream' }
   }
 
@@ -96,18 +163,21 @@ const MeetingMinutesApp = () => {
     })
     const payload = await parseResponse(response)
     if (!response.ok) throw new Error(payload.error || '音视频转文字失败。')
-    setTranscript(payload.transcript || '')
+    const completedTranscript = String(payload.transcript || '').trim()
+    if (!completedTranscript) throw new Error('音视频转文字未返回有效内容。')
+    setTranscript(completedTranscript)
     setState('transcribed')
-    setNotice('转写稿已生成。请先核对、补充或修订，再生成正式会议纪要。')
+    setNotice('音视频已转为文字，正在按会议纪要规范整理全文。')
+    return { transcript: completedTranscript, references }
   }
 
-  const generateMinutes = async () => {
-    if (!transcript.trim()) throw new Error('请先完成音视频转文字，并确认转写稿不为空。')
+  const generateMinutes = async (sourceTranscript = transcript, sourceReferences = uploadedReferences) => {
+    if (!sourceTranscript.trim()) throw new Error('请先完成音视频转文字，并确认转写稿不为空。')
     setState('writing')
     const response = await fetch('/api/meeting-minutes', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        transcript, references: uploadedReferences, meeting_title: meetingTitle, meeting_date: meetingDate,
+        transcript: sourceTranscript, references: sourceReferences, meeting_title: meetingTitle, meeting_date: meetingDate,
         meeting_background: meetingBackground, focus_points: focusPoints,
       }),
     })
@@ -123,7 +193,10 @@ const MeetingMinutesApp = () => {
     setError(''); setNotice('')
     try {
       if (hasTranscript) await generateMinutes()
-      else await transcribe()
+      else {
+        const completed = await transcribe()
+        await generateMinutes(completed.transcript, completed.references)
+      }
     }
     catch (err: any) {
       setState('error'); setError(err.message || '处理失败。')
@@ -141,7 +214,7 @@ const MeetingMinutesApp = () => {
     <main className="min-h-screen bg-[#f6f7f4] text-[#17211d]">
       <div className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
         <header className="flex flex-col gap-4 border-b border-[#dfe4dc] pb-6 sm:flex-row sm:items-end sm:justify-between">
-          <div><p className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-[#58715f]">Medical research workflow</p><h1 className="font-serif text-3xl font-semibold tracking-tight text-[#173d2a] sm:text-4xl">创新药会议纪要助手</h1><p className="mt-2 max-w-2xl text-sm leading-6 text-[#66736b]">先将会议录音或视频转为完整文字稿，再由你确认后生成符合投研规范的全量会议纪要。</p></div>
+          <div><p className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-[#58715f]">Medical research workflow</p><h1 className="font-serif text-3xl font-semibold tracking-tight text-[#173d2a] sm:text-4xl">创新药会议纪要助手</h1><p className="mt-2 max-w-2xl text-sm leading-6 text-[#66736b]">上传会议录音或视频，系统自动完成转文字并输出符合投研规范的全量会议纪要。</p></div>
           <div className="rounded-full border border-[#cbd8cc] bg-[#edf5ed] px-4 py-2 text-sm font-medium text-[#386044]">{statusLabels[state]}</div>
         </header>
 
@@ -157,9 +230,9 @@ const MeetingMinutesApp = () => {
             <section><div className="mb-3 flex items-baseline justify-between"><h2 className="font-serif text-lg font-semibold text-[#173d2a]">1. 会议文件</h2><span className="text-xs text-[#758177]">必填</span></div><label className="block rounded-xl border border-dashed border-[#aec2ae] bg-[#f7fbf6] p-4 transition hover:border-[#56805e]"><span className="block text-sm font-medium text-[#294a35]">录音或视频</span><span className="mt-1 block text-xs leading-5 text-[#6d7a70]">支持 mp3、wav、m4a、mp4、mov、mkv、webm，最大 2 GB。</span><input type="file" accept="audio/*,video/*,.m4a,.mkv" onChange={handleMediaChange} className="mt-3 block w-full text-xs file:mr-3 file:rounded-lg file:border-0 file:bg-[#173d2a] file:px-3 file:py-2 file:text-xs file:font-medium file:text-white" />{mediaFile && <span className="mt-3 block break-all text-xs font-medium text-[#3f684b]">已选择：{mediaFile.name} · {formatSize(mediaFile.size)}</span>}</label></section>
             <section><div className="mb-3 flex items-baseline justify-between"><h2 className="font-serif text-lg font-semibold text-[#173d2a]">2. 参考资料</h2><span className="text-xs text-[#758177]">可选</span></div><label className="block rounded-xl border border-dashed border-[#d3ddd2] bg-[#fafcf9] p-4 transition hover:border-[#8ca58f]"><span className="block text-sm font-medium text-[#294a35]">PPT / PDF / Office / 文本附件</span><span className="mt-1 block text-xs leading-5 text-[#6d7a70]">支持同时上传 PPT、PDF、DOCX、XLSX、CSV、TXT、MD 等，作为转写稿核对依据。</span><input type="file" multiple onChange={handleReferencesChange} className="mt-3 block w-full text-xs file:mr-3 file:rounded-lg file:border-0 file:bg-[#e8efe8] file:px-3 file:py-2 file:text-xs file:font-medium file:text-[#294a35]" />{!!referenceFiles.length && <ul className="mt-3 space-y-1 text-xs text-[#52705a]">{referenceFiles.map(file => <li key={`${file.name}-${file.size}`} className="break-all">• {file.name} · {formatSize(file.size)}</li>)}</ul>}</label></section>
             <section className="space-y-3"><h2 className="font-serif text-lg font-semibold text-[#173d2a]">3. 会议背景</h2><label className="block"><span className="mb-1.5 block text-sm font-medium text-[#405446]">会议标题</span><input value={meetingTitle} onChange={event => setMeetingTitle(event.target.value)} placeholder="例如：某创新药公司业绩交流会" className="w-full rounded-lg border border-[#d8dfd6] px-3 py-2.5 text-sm outline-none transition focus:border-[#497457] focus:ring-2 focus:ring-[#dceade]" /></label><label className="block"><span className="mb-1.5 block text-sm font-medium text-[#405446]">会议日期</span><input value={meetingDate} onChange={event => setMeetingDate(event.target.value)} placeholder="例如：2026-07-29" className="w-full rounded-lg border border-[#d8dfd6] px-3 py-2.5 text-sm outline-none transition focus:border-[#497457] focus:ring-2 focus:ring-[#dceade]" /></label><label className="block"><span className="mb-1.5 block text-sm font-medium text-[#405446]">会议背景</span><textarea value={meetingBackground} onChange={event => setMeetingBackground(event.target.value)} rows={3} placeholder="公司、参会管理层、会议目的等。" className="w-full resize-none rounded-lg border border-[#d8dfd6] px-3 py-2.5 text-sm outline-none transition focus:border-[#497457] focus:ring-2 focus:ring-[#dceade]" /></label><label className="block"><span className="mb-1.5 block text-sm font-medium text-[#405446]">特别关注点</span><textarea value={focusPoints} onChange={event => setFocusPoints(event.target.value)} rows={3} placeholder="例如：管线进度、临床数据、商业化、BD、财务、风险。" className="w-full resize-none rounded-lg border border-[#d8dfd6] px-3 py-2.5 text-sm outline-none transition focus:border-[#497457] focus:ring-2 focus:ring-[#dceade]" /></label></section>
-            <div className="rounded-lg bg-[#f3f7f1] px-3 py-3 text-xs leading-5 text-[#55715c]">先得到可编辑的完整转写稿，再按你的会议纪要规范输出摘要、主题纪要、Q&A、全量逐字稿纪要与待确认事项。</div>
+            <div className="rounded-lg bg-[#f3f7f1] px-3 py-3 text-xs leading-5 text-[#55715c]">一次提交自动完成转文字和纪要整理，输出摘要、主题纪要、Q&A、全量逐字稿纪要与待确认事项。转写稿会附在结果中，便于复核。</div>
             {error && <div className="rounded-lg border border-[#f2c6c0] bg-[#fff5f3] px-3 py-2.5 text-sm text-[#9d3024]">{error}</div>}{notice && <div className="rounded-lg border border-[#b9d8c0] bg-[#f0faf2] px-3 py-2.5 text-sm text-[#2f6a3f]">{notice}</div>}
-            <button type="submit" disabled={isProcessing} className="w-full rounded-lg bg-[#173d2a] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#24543a] disabled:cursor-not-allowed disabled:bg-[#92a893]">{isProcessing ? '正在处理，请勿关闭页面…' : hasTranscript ? '根据转写稿生成会议纪要' : '上传并将音视频转文字'}</button>
+            <button type="submit" disabled={isProcessing} className="w-full rounded-lg bg-[#173d2a] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#24543a] disabled:cursor-not-allowed disabled:bg-[#92a893]">{isProcessing ? '正在处理，请勿关闭页面…' : hasTranscript ? '根据转写稿重新生成会议纪要' : '生成全量会议纪要'}</button>
           </form>
 
           <section className="flex min-h-[720px] flex-col overflow-hidden rounded-2xl border border-[#dde4dc] bg-white shadow-[0_12px_32px_rgba(28,55,38,0.06)]">
