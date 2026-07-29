@@ -15,6 +15,7 @@
 # production
 /build
 /work
+NUL
 
 # misc
 .DS_Store
