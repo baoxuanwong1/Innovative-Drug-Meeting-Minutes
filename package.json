@@ -1,5 +1,5 @@
 {
-  "name": "webapp-conversation",
+  "name": "innovative-drug-meeting-minutes",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -31,7 +31,6 @@
     "class-variance-authority": "^0.7.1",
     "classnames": "^2.5.1",
     "copy-to-clipboard": "^3.3.3",
-    "dify-client": "^2.3.1",
     "eslint-config-next": "~15.5.9",
     "eventsource-parser": "^1.0.0",
     "husky": "^9.1.7",
@@ -39,11 +38,13 @@
     "i18next-resources-to-backend": "^1.2.1",
     "immer": "^9.0.19",
     "js-cookie": "^3.0.1",
+    "jszip": "^3.10.1",
     "katex": "^0.16.21",
     "lodash-es": "^4.17.21",
     "mime": "^4.0.7",
     "negotiator": "^0.6.3",
     "next": "15.5.7",
+    "pdf-parse": "^1.1.1",
     "rc-textarea": "^1.5.3",
     "react": "~19.1.4",
     "react-dom": "~19.1.4",

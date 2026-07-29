@@ -1,34 +1,26 @@
-# 医药会议纪要生成器
+# 创新药会议纪要助手
 
-This fork turns the original Dify conversation web app template into a direct meeting-minutes web app.
+独立的 Next.js 会议纪要应用，不依赖任何工作流平台或外部对话应用。
 
-The app lets users upload an `mp3`, `m4a`, `wav`, `mp4`, or `mov` file, stores it in Aliyun OSS, sends a temporary OSS URL to Bailian / DashScope Paraformer ASR, and then calls Qwen to generate Markdown meeting minutes.
+它将会议录音/视频上传至阿里云 OSS，使用阿里云百炼 Paraformer 转写，并使用 Qwen 按医药投研会议纪要规范生成 Markdown。可额外上传 PPT、PDF、DOCX、XLSX、CSV、TXT、MD 等附件，系统会提取其中可读文字，用于核对产品名称、数据和会议背景。
 
-It does not require a Dify Workflow.
+处理流程为：**上传文件 → 音视频转文字 → 用户核对/修订完整转写稿 → 生成正式会议纪要**。会议纪要生成接口只接收已确认的转写稿，确保“转文字”是一个可见、可复核的独立步骤。
 
-## Workflow Shape
+## 输出规范
 
-```text
-Browser upload
--> Next.js API route creates an OSS signed upload URL
--> Browser uploads the file directly to Aliyun OSS
--> Next.js API route receives the OSS signed download URL
--> DashScope Paraformer ASR
--> Download transcription JSON
--> Extract transcript
--> DashScope Qwen meeting-minutes generation
--> Browser Markdown preview
-```
+生成结果固定包含：
 
-## Environment Variables
+- 会议基本信息和核心摘要
+- 按实际主题梳理的会议内容纪要
+- Q&A
+- 全量逐字稿纪要（书面化、去口语化，但不人为省略会议信息）
+- 待确认事项
 
-Create `.env.local` from `.env.example`.
+系统不会补造事实。转写听不清或资料相互冲突的内容会标记为“待确认”。
 
-```bash
-cp .env.example .env.local
-```
+## 配置
 
-Fill in:
+复制 `.env.example` 为 `.env.local`，再填写：
 
 ```text
 ALI_OSS_REGION=oss-cn-hangzhou
@@ -44,21 +36,17 @@ DASHSCOPE_ASR_MAX_ATTEMPTS=36
 DASHSCOPE_ASR_POLL_INTERVAL_MS=5000
 ```
 
-Keep all keys server-side. Do not use `NEXT_PUBLIC_*` for Aliyun credentials or DashScope keys.
+所有密钥都只应配置在服务端环境变量中。
 
-## Development
+## 本地运行
 
 ```bash
 npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000).
+## 部署提示
 
-## Deployment Notes
-
-- The server running this app must be able to reach Aliyun OSS and DashScope.
-- `ALI_OSS_REGION` must match the real region of `ALI_OSS_BUCKET`.
-- The OSS bucket needs CORS enabled for browser uploads. Allow your local/Vercel origin, method `PUT`, and header `Content-Type`.
-- The OSS signed URL expiry should be long enough for ASR processing. Start with `3600`.
-- Long recordings may exceed Vercel request time limits. Start with short recordings, then adjust `DASHSCOPE_ASR_MAX_ATTEMPTS` and deployment timeout as needed.
+- OSS Bucket 需要对站点域名放行 `PUT` 跨域请求和 `Content-Type` 请求头。
+- 录音、视频和附件使用限时签名地址，仅供转写与本次生成过程读取。
+- 超长录音会受到部署环境运行时长限制；可视需要提高 `DASHSCOPE_ASR_MAX_ATTEMPTS`，并在部署平台配置相应的函数超时。

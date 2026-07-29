@@ -40,14 +40,14 @@ export async function POST(request: Request) {
       method: 'PUT',
       'Content-Type': contentType,
     })
-    const audioUrl = ossClient.signatureUrl(objectName, {
+    const fileUrl = ossClient.signatureUrl(objectName, {
       expires,
       method: 'GET',
     })
 
     return NextResponse.json({
       upload_url: uploadUrl,
-      audio_url: audioUrl,
+      file_url: fileUrl,
       content_type: contentType,
       object_name: objectName,
     })
