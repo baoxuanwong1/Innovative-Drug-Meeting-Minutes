@@ -24,31 +24,24 @@ const formatSize = (size: number) => `${(size / 1024 / 1024).toFixed(size > 1024
 // A native HTML form is used instead of fetch() for the cross-origin object
 // upload. Form submissions do not require the bucket to grant browser CORS,
 // while the short-lived policy limits the upload to one exact object name.
-const uploadBySignedForm = (file: File, ticket: UploadTicket) => new Promise<void>((resolve, reject) => {
+const submitBySignedForm = (file: File, ticket: UploadTicket) => {
   const frameName = `meeting-upload-${crypto.randomUUID()}`
   const iframe = document.createElement('iframe')
   const form = document.createElement('form')
-  let submitted = false
-  let settled = false
   const cleanUp = () => {
     window.clearTimeout(timer)
     form.remove()
     iframe.remove()
   }
-  const finish = (error?: Error) => {
-    if (settled) return
-    settled = true
-    cleanUp()
-    if (error) reject(error)
-    else resolve()
-  }
-  const timer = window.setTimeout(() => finish(new Error(`「${file.name}」上传超时，请检查网络后重试。`)), 10 * 60 * 1000)
+  // OSS returns 204 for a successful form upload, so an iframe load event is
+  // not a reliable completion signal. In particular, its initial about:blank
+  // load can arrive after form.submit() and be mistaken for success. The caller
+  // verifies completion by polling the server-side OSS HEAD endpoint instead.
+  const timer = window.setTimeout(cleanUp, 10 * 60 * 1000)
 
   iframe.name = frameName
   iframe.title = '文件上传'
   iframe.className = 'hidden'
-  iframe.addEventListener('load', () => { if (submitted) finish() })
-  iframe.addEventListener('error', () => finish(new Error(`「${file.name}」上传失败，请重试。`)))
   form.action = ticket.upload_url
   form.method = 'post'
   form.enctype = 'multipart/form-data'
@@ -71,19 +64,21 @@ const uploadBySignedForm = (file: File, ticket: UploadTicket) => new Promise<voi
   form.append(fileInput)
 
   document.body.append(iframe, form)
-  submitted = true
   form.submit()
-})
+  return cleanUp
+}
 
 const waitForStoredFile = async (file: File, ticket: UploadTicket) => {
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  // A 2 GB media file can take minutes to reach OSS. Poll for up to ten minutes
+  // instead of declaring failure after the previous six-second window.
+  for (let attempt = 0; attempt < 300; attempt += 1) {
     const response = await fetch('/api/oss-upload-status', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ object_name: ticket.object_name }),
     })
     const payload = await parseResponse(response)
     if (response.ok && payload.uploaded) return
-    await new Promise(resolve => window.setTimeout(resolve, 750))
+    await new Promise(resolve => window.setTimeout(resolve, 2000))
   }
   throw new Error(`「${file.name}」未能上传到处理服务，请重试。`)
 }
@@ -147,8 +142,13 @@ const MeetingMinutesApp = () => {
     const payload = await parseResponse(signedUrlResponse)
     if (!signedUrlResponse.ok) throw new Error(payload.error || `无法为「${file.name}」创建上传链接。`)
     const ticket = payload as UploadTicket
-    await uploadBySignedForm(file, ticket)
-    await waitForStoredFile(file, ticket)
+    const cleanUpUpload = submitBySignedForm(file, ticket)
+    try {
+      await waitForStoredFile(file, ticket)
+    }
+    finally {
+      cleanUpUpload()
+    }
     return { name: file.name, url: payload.file_url, type: file.type || 'application/octet-stream' }
   }
 
